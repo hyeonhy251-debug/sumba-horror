@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>숨바꼭질 — 4인 협동 공포</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#030305;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+canvas{display:block;width:100%;height:100%;background:#07070a}
+.panel{position:fixed;z-index:10;background:rgba(8,8,13,.94);border:1px solid #3a3a46;border-radius:18px;box-shadow:0 20px 70px #000;padding:24px}
+#menu{inset:0;margin:auto;width:min(650px,92vw);height:max-content;top:50%;transform:translateY(-50%)}
+h1{font-size:44px;margin:0 0 4px;letter-spacing:-2px}.sub{color:#aaa;margin-bottom:18px}
+input{width:100%;padding:12px;margin:5px 0;border-radius:10px;border:1px solid #444;background:#11121a;color:#fff;font-size:16px}
+button{border:0;border-radius:10px;padding:11px 15px;margin:5px 2px;font-weight:800;cursor:pointer;background:#d4f47e;color:#111}
+button.secondary{background:#262631;color:#eee;border:1px solid #444}
+#hud{display:none;left:12px;top:12px;z-index:5;padding:11px 13px;border-radius:12px;background:#09090ed9;border:1px solid #333;line-height:1.5}
+#roomcode{font-weight:900;color:#d4f47e;letter-spacing:2px}
+#msg{position:fixed;z-index:7;left:50%;top:12%;transform:translateX(-50%);font-size:24px;font-weight:900;text-align:center;text-shadow:0 3px 15px #000;pointer-events:none;max-width:90vw}
+#touch{display:none;position:fixed;z-index:6;right:12px;bottom:12px;grid-template-columns:repeat(3,58px);gap:6px}
+#touch button{height:52px;padding:0;background:#ffffff1c;color:white;border:1px solid #ffffff30}
+#touch .wide{grid-column:span 3}
+.small{font-size:12px;color:#999;line-height:1.5}.warning{color:#ff7474}
+#players{position:fixed;right:12px;top:12px;z-index:5;background:#09090ed9;border:1px solid #333;border-radius:12px;padding:10px 12px;min-width:150px}
+@media(max-width:700px){#touch{display:grid}h1{font-size:36px}.panel{padding:20px}}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"></div><div id="players"></div><div id="msg"></div>
+<div id="touch">
+<button data-k="ArrowUp">▲</button><button data-k="e">E</button><button data-k="ArrowRight">▶</button>
+<button data-k="ArrowLeft">◀</button><button data-k="ArrowDown">▼</button><button data-k=" ">숨기</button>
+<button class="wide" id="voiceBtn">🎙️ 음성 인식</button>
+</div>
+
+<div id="menu" class="panel">
+<h1>숨바꼭질</h1>
+<div class="sub">최대 4명이 함께 탈출하는 온라인 협동 공포게임</div>
+<p>🔑 <b>열쇠 5개</b>를 찾아 출구를 여세요.<br>
+🗄️ 장롱에 숨을 수 있지만 귀신은 장롱을 확인합니다.<br>
+👻 귀신은 가까운 생존자를 추격합니다.<br>
+🎙️ 마이크를 켜면 <b>실제 목소리</b>를 감지하고 귀신이 소리를 따라갑니다.</p>
+<input id="name" maxlength="12" value="Player" placeholder="닉네임">
+<input id="room" maxlength="12" value="HORROR1" placeholder="방 코드">
+<button id="host">방 만들기</button>
+<button id="join" class="secondary">친구 방 참가</button>
+<p class="small">방장은 링크가 없어도 방 코드를 친구에게 알려주면 됩니다. 친구들도 같은 GitHub Pages 주소를 열고 같은 방 코드를 입력하세요.</p>
+<p class="small warning">공포 연출은 어둡고 갑작스러운 등장·추격 중심입니다. 고어 표현은 넣지 않았습니다.</p>
+</div>
+
+<script>
+const canvas=document.getElementById("game"),ctx=canvas.getContext("2d");
+let W=innerWidth,H=innerHeight;canvas.width=W;canvas.height=H;
+addEventListener("resize",()=>{W=innerWidth;H=innerHeight;canvas.width=W;canvas.height=H});
+const WORLD={w:1800,h:1100};
+const initialItems=[
+{id:1,x:205,y:170,got:false},{id:2,x:610,y:190,got:false},{id:3,x:990,y:510,got:false},{id:4,x:1430,y:710,got:false},{id:5,x:820,y:900,got:false}
+];
+const initialClosets=[
+{x:300,y:220,hidden:null},{x:720,y:250,hidden:null},{x:1260,y:230,hidden:null},{x:450,y:790,hidden:null},{x:1110,y:790,hidden:null}
+];
+const exit={x:1660,y:540};
+let mode=null,peer=null,hostId=null,room="",meId="",me={x:150,y:540,alive:true,hidden:null,keys:0,name:"Player"};
+let players={},items=[],closets=[],ghost={x:900,y:500},connections=[],last=performance.now(),keys={},voice=false,recognition=null;
+let hostStateTimer=null;
+
+function cleanRoom(s){return s.toUpperCase().replace(/[^A-Z0-9_-]/g,"").slice(0,12)||"HORROR1"}
+function say(t,ms=2400){const el=document.getElementById("msg");el.textContent=t;clearTimeout(el.t);el.t=setTimeout(()=>el.textContent="",ms)}
+function d(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function cloneWorld(){return {items:structuredClone(initialItems),closets:structuredClone(initialClosets),ghost:{x:ghost.x,y:ghost.y}}}
+function makeId(){return "p"+Math.random().toString(36).slice(2,9)}
+function broadcast(data){connections=connections.filter(c=>c.open);connections.forEach(c=>c.send(data))}
+function fullState(){return {type:"state",players,items,closets,ghost}}
+function speakGhost(){try{speechSynthesis.cancel();const u=new SpeechSynthesisUtterance("난 너를 볼 수 있어…");u.lang="ko-KR";u.rate=.72;u.pitch=.45;speechSynthesis.speak(u)}catch(e){}}
+
+function setupPeer(isHost){
+ room=cleanRoom(document.getElementById("room").value);
+ const name=(document.getElementById("name").value.trim()||"Player").slice(0,12);
+ mode=isHost?"host":"client";
+ const desired=isHost?`sumba-${room}`:undefined;
+ peer=new Peer(desired);
+ peer.on("open",id=>{
+   meId=id;hostId=isHost?id:`sumba-${room}`;
+   me={id,name,x:isHost?150:250,y:isHost?540:540,alive:true,hidden:null,keys:0,name};
+   if(isHost){
+     const w=cloneWorld();items=w.items;closets=w.closets;ghost=w.ghost;
+     players={[meId]:me};
+     say("방이 만들어졌습니다! 방 코드: "+room,5000);
+   }else{
+     say("방에 연결하는 중…");
+     connectHost();
+   }
+   document.getElementById("menu").style.display="none";
+   document.getElementById("hud").style.display="block";
+   document.getElementById("players").style.display="block";
+ });
+ peer.on("connection",conn=>{
+   if(mode!=="host")return;
+   if(Object.keys(players).length>=4){conn.on("open",()=>conn.send({type:"full"}));return}
+   acceptConnection(conn);
+ });
+ peer.on("error",e=>{console.error(e);say("연결 오류: "+e.type,5000)});
+}
+function connectHost(){
+ const c=peer.connect(hostId,{reliable:true});
+ c.on("open",()=>{connections.push(c);c.send({type:"hello",name:me.name});say("친구 방에 참가했습니다!",3000)});
+ c.on("data",handle);
+ c.on("close",()=>say("방장과 연결이 끊겼습니다.",5000));
+}
+function acceptConnection(c){
+ c.on("open",()=>{
+   connections.push(c);
+   const id=makeId(), count=Object.keys(players).length;
+   const p={id,name:"Player",x:250+count*55,y:540,alive:true,hidden:null,keys:0};
+   players[id]=p;
+   c._playerId=id;c.send({type:"welcome",id,host:true,state:fullState()});
+   broadcast({type:"state",...fullState()});
+   say("새 친구가 참가했습니다!");
+ });
+ c.on("data",m=>{
+   if(m.type==="hello"&&c._playerId){players[c._playerId].name=String(m.name||"Player").slice(0,12)}
+   if(c._playerId) hostHandle(c._playerId,m);
+ });
+ c.on("close",()=>{if(c._playerId){delete players[c._playerId];broadcast(fullState())}});
+}
+function hostHandle(id,m){
+ const p=players[id];if(!p)return;
+ if(m.type==="move"){p.x=clamp(+m.x||p.x,30,WORLD.w-30);p.y=clamp(+m.y||p.y,30,WORLD.h-30);p.hidden=m.hidden||null}
+ if(m.type==="key"){const it=items.find(x=>x.id===m.id);if(it&&!it.got){it.got=true;p.keys++;say(p.name+"이 열쇠를 찾았습니다!")}}
+ if(m.type==="hide"){const c=closets[m.index];if(c){if(m.enter){if(c.hidden===null){c.hidden=id;p.hidden=m.index}}else if(c.hidden===id){c.hidden=null;p.hidden=null}}}
+ if(m.type==="voice"){ghost={x:p.x,y:p.y};say("👻 귀신이 "+p.name+"의 목소리를 들었습니다…")}
+}
+function handle(m){
+ if(m.type==="welcome"){meId=m.id;hostId=peer.id;applyState(m.state)}
+ if(m.type==="state"||m.players)applyState(m)
+ if(m.type==="event"){say(m.text);if(m.ghostLine)speakGhost()}
+ if(m.type==="full")say("이 방은 이미 4명입니다.",4000)
+}
+function applyState(s){
+ players=s.players||players;items=s.items||items;closets=s.closets||closets;ghost=s.ghost||ghost;
+ me=players[meId]||me;
+}
+function send(m){
+ if(mode==="host")hostHandle(meId,m);
+ else connections.forEach(c=>{if(c.open)c.send(m)});
+}
+function start(){
+ document.getElementById("host").onclick=()=>setupPeer(true);
+ document.getElementById("join").onclick=()=>setupPeer(false);
+}
+start();
+
+addEventListener("keydown",e=>{keys[e.key]=true;if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key))e.preventDefault();});
+addEventListener("keyup",e=>keys[e.key]=false);
+document.querySelectorAll("#touch button[data-k]").forEach(b=>{
+ b.onpointerdown=e=>{e.preventDefault();keys[b.dataset.k]=true};
+ b.onpointerup=e=>{e.preventDefault();keys[b.dataset.k]=false};
+ b.onpointerleave=()=>keys[b.dataset.k]=false;
+});
+
+function toggleVoice(){
+ if(voice){voice=false;if(recognition)recognition.stop();say("음성 인식 꺼짐");return}
+ const R=window.SpeechRecognition||window.webkitSpeechRecognition;
+ if(!R){say("이 브라우저에서는 음성 인식을 지원하지 않습니다.");return}
+ recognition=new R();recognition.lang="ko-KR";recognition.continuous=true;recognition.interimResults=false;
+ recognition.onresult=e=>{const text=e.results[e.results.length-1][0].transcript.trim();if(text)send({type:"voice",text})};
+ recognition.onend=()=>{if(voice)try{recognition.start()}catch(e){}};
+ try{recognition.start();voice=true;say("🎙️ 목소리를 들으면 귀신이 따라옵니다.",3000)}catch(e){say("마이크 권한을 허용해주세요.")}
+}
+document.getElementById("voiceBtn").onclick=toggleVoice;
+
+function interact(){
+ if(!me.alive)return;
+ let best=null,bd=55;
+ for(const c of closets){const q=d(c,me);if(q<bd){best=c;bd=q}}
+ if(best){
+   const idx=closets.indexOf(best);
+   if(me.hidden===idx){send({type:"hide",index:idx,enter:false});return}
+   if(best.hidden===null){send({type:"hide",index:idx,enter:true});return}
+ }
+ let ki=items.find(i=>!i.got&&d(i,me)<48);
+ if(ki){send({type:"key",id:ki.id});return}
+ if(items.filter(i=>i.got).length===5&&d(exit,me)<85){say("🎉 탈출 성공!");if(mode==="host")broadcast({type:"event",text:"🎉 모두 탈출 조건을 달성했습니다!"})}
+}
+let eLatch=false;
+function tick(){
+ if(!mode||!me)return;
+ let dx=(keys.ArrowRight||keys.d?1:0)-(keys.ArrowLeft||keys.a?1:0);
+ let dy=(keys.ArrowDown||keys.s?1:0)-(keys.ArrowUp||keys.w?1:0);
+ if((keys.e||keys[" "])&&!eLatch){interact();eLatch=true}else if(!keys.e&&!keys[" "])eLatch=false;
+ if(me.alive&&!me.hidden&&(dx||dy)){
+   const n=Math.hypot(dx,dy);me.x=clamp(me.x+dx/n*3.2,30,WORLD.w-30);me.y=clamp(me.y+dy/n*3.2,30,WORLD.h-30);
+ }
+ send({type:"move",x:me.x,y:me.y,hidden:me.hidden});
+ if(mode==="host")hostAI();
+}
+function hostAI(){
+ const alive=Object.values(players).filter(p=>p.alive);
+ const visible=alive.filter(p=>p.hidden===null);
+ let target=visible.sort((a,b)=>d(ghost,a)-d(ghost,b))[0];
+ if(target){
+   const dd=d(ghost,target),sp=dd<240?2.8:1.25;
+   if(dd>32){ghost.x+=(target.x-ghost.x)/dd*sp;ghost.y+=(target.y-ghost.y)/dd*sp}
+   if(dd<38){target.alive=false;target.hidden=null;say("👻 "+target.name+"이(가) 잡혔습니다!");broadcast({type:"event",text:"👻 "+target.name+"이(가) 잡혔습니다!"})}
+ }
+ for(const c of closets){
+   if(c.hidden!==null){
+     const p=players[c.hidden];
+     if(p&&d(ghost,c)<62){
+       p.alive=false;p.hidden=null;const victim=p.name;c.hidden=null;
+       say("👻 장롱 문이 열렸습니다…");speakGhost();
+       broadcast({type:"event",text:"👻 "+victim+"이(가) 장롱에서 발견되었습니다.",ghostLine:true});
+     }
+   }
+ }
+ if(items.every(i=>i.got)&&alive.some(p=>d(p,exit)<75)){
+   broadcast({type:"event",text:"🎉 모든 열쇠를 모으고 탈출했습니다!"});say("🎉 탈출 성공!");
+ }
+ broadcast({type:"state",...fullState()});
+}
+setInterval(tick,50);
+
+function draw(){
+ ctx.fillStyle="#050508";ctx.fillRect(0,0,W,H);
+ if(!mode){requestAnimationFrame(draw);return}
+ const camX=clamp(me.x-W/2,0,Math.max(0,WORLD.w-W)),camY=clamp(me.y-H/2,0,Math.max(0,WORLD.h-H));
+ ctx.save();ctx.translate(-camX,-camY);
+ ctx.fillStyle="#0d0d14";ctx.fillRect(0,0,WORLD.w,WORLD.h);
+ for(let y=30;y<WORLD.h;y+=270)for(let x=30;x<WORLD.w;x+=330){ctx.strokeStyle="#24242d";ctx.strokeRect(x,y,285,220)}
+ ctx.fillStyle="#202028";for(let x=0;x<WORLD.w;x+=150)ctx.fillRect(x,0,4,WORLD.h);
+ ctx.fillStyle="#274323";ctx.fillRect(exit.x-38,exit.y-48,76,96);ctx.fillStyle="#d4f47e";ctx.font="bold 16px system-ui";ctx.fillText("EXIT",exit.x-18,exit.y+6);
+ for(const i of items)if(!i.got){ctx.fillStyle="#e6c94c";ctx.beginPath();ctx.arc(i.x,i.y,9,0,Math.PI*2);ctx.fill();ctx.fillRect(i.x+6,i.y-3,18,6)}
+ for(const c of closets){ctx.fillStyle="#43281e";ctx.fillRect(c.x-35,c.y-35,70,70);ctx.strokeStyle=c.hidden!==null?"#a83232":"#81503a";ctx.strokeRect(c.x-35,c.y-35,70,70);ctx.fillStyle="#ddd";ctx.font="12px system-ui";ctx.fillText(c.hidden!==null?"…":"장롱",c.x-14,c.y+4)}
+ for(const p of Object.values(players)){
+   if(!p.alive||p.hidden!==null)continue;
+   ctx.fillStyle=p.id===meId?"#d4f47e":"#61b6ff";ctx.beginPath();ctx.arc(p.x,p.y,15,0,Math.PI*2);ctx.fill();
+   ctx.fillStyle="#fff";ctx.font="12px system-ui";ctx.fillText(p.name,p.x-25,p.y-20);
+ }
+ if(me.hidden===null&&me.alive){ctx.fillStyle="#d4f47e";ctx.beginPath();ctx.arc(me.x,me.y,16,0,Math.PI*2);ctx.fill()}
+ // Ghost: unsettling silhouette without gore.
+ ctx.fillStyle="#14141a";ctx.beginPath();ctx.arc(ghost.x,ghost.y-8,25,Math.PI,0);ctx.lineTo(ghost.x+31,ghost.y+36);ctx.lineTo(ghost.x-31,ghost.y+36);ctx.closePath();ctx.fill();
+ ctx.fillStyle="#e9e9e9";ctx.beginPath();ctx.arc(ghost.x-9,ghost.y-12,5,0,Math.PI*2);ctx.arc(ghost.x+9,ghost.y-12,5,0,Math.PI*2);ctx.fill();
+ ctx.fillStyle="#8f1d2c";ctx.fillRect(ghost.x-8,ghost.y+2,16,4);
+ ctx.restore();
+ // darkness
+ const radius=Math.max(110,Math.min(330,me.hidden!==null?130:230));
+ const g=ctx.createRadialGradient(W/2,H/2,radius,W/2,H/2,Math.max(W,H)*.7);g.addColorStop(0,"transparent");g.addColorStop(1,"rgba(0,0,0,.86)");ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+ const got=items.filter(i=>i.got).length, alive=Object.values(players).filter(p=>p.alive).length;
+ document.getElementById("hud").innerHTML=`<b>숨바꼭질</b> · 방 <span id="roomcode">${room}</span><br>🔑 ${got}/5　👥 ${alive}/4　${me.hidden!==null?"🗄️ 장롱 안":"🔦 탐색 중"}<br><span class="small">WASD/방향키 이동 · E/Space 상호작용 · V 음성</span>`;
+ document.getElementById("players").innerHTML="<b>플레이어</b><br>"+Object.values(players).map(p=>`${p.alive?"🟢":"⚫"} ${p.name}${p.hidden!==null?" 🗄️":""}`).join("<br>");
+ requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>
